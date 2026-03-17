@@ -5,6 +5,7 @@ import pandas as pd
 import streamlit as st
 import plotly.express as px
 from azure.storage.blob import BlobServiceClient
+from openai import OpenAI
 from pycaret.regression import load_model, predict_model
 from dotenv import load_dotenv
 
@@ -13,11 +14,21 @@ load_dotenv()
 @dataclass(frozen=True)
 class AppConfig:
     PAGE_TITLE: str = "AI Insurance Premium Advisor"
+    USD_TO_PLN_RATE: float = 4.0
+    MONTHS_IN_YEAR: int = 12
+    TARGET_BMI: float = 24.9
+    MARKET_ADJUSTMENT_FACTOR: float = 0.2
+    GROUP_POLICY_DISCOUNT: float = 0.85
+    ALCOHOL_UNITS_THRESHOLD: int = 7
+    ACTIVITY_DAYS_THRESHOLD: int = 3
 
     AZURE_STORAGE_CONNECTION_STRING: str = os.getenv("AZURE_STORAGE_CONNECTION_STRING", "").strip()
     AZURE_STORAGE_CONTAINER_NAME: str = os.getenv("AZURE_STORAGE_CONTAINER_NAME", "").strip()
-    AZURE_MODEL_BLOB_NAME: str = os.getenv("AZURE_MODEL_BLOB_NAME", "fin.pkl").strip()
-    MODEL_NAME = os.getenv("MODEL_NAME", "insurance.pkl")
+    MODEL_NAME: str = os.getenv("MODEL_NAME", "insurance").strip()
+    AZURE_MODEL_BLOB_NAME: str = os.getenv("AZURE_MODEL_BLOB_NAME", "").strip()
+
+    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "").strip()
+    OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
 
 @dataclass(frozen=True)
 class UserProfile:
@@ -54,7 +65,9 @@ class AppState:
 
 @st.cache_resource
 def load_pipeline(_config: AppConfig) -> Any:
-    local_file_path = f"{_config.LOCAL_MODEL_NAME}.pkl"
+    local_model_name = _config.MODEL_NAME
+    local_file_path = f"{local_model_name}.pkl"
+    blob_name = _config.AZURE_MODEL_BLOB_NAME or local_file_path
     
     try:
         if not os.path.exists(local_file_path):
@@ -66,12 +79,12 @@ def load_pipeline(_config: AppConfig) -> Any:
             blob_service = BlobServiceClient.from_connection_string(_config.AZURE_STORAGE_CONNECTION_STRING)
             blob_client = blob_service.get_blob_client(
                 container=_config.AZURE_STORAGE_CONTAINER_NAME,
-                blob=_config.AZURE_MODEL_BLOB_NAME,
+                blob=blob_name,
             )
             with open(local_file_path, "wb") as model_file:
                 model_file.write(blob_client.download_blob().readall())
             
-        return load_model(_config.LOCAL_MODEL_NAME, verbose=False)
+        return load_model(local_model_name, verbose=False)
         
     except Exception as e:
         st.error(f"Critical System Error: {e}")
@@ -93,6 +106,42 @@ def calculate_final_premium(u: UserProfile, pipeline: Any, config: AppConfig) ->
     base_premium = _calculate_base_premium(u, pipeline, config)
     final_premium = base_premium * config.GROUP_POLICY_DISCOUNT if u.has_group_option else base_premium
     return round(final_premium, 2)
+
+def _build_profile_summary(u: UserProfile) -> str:
+    return (
+        f"Age: {u.age}, Sex: {u.sex}, BMI: {u.bmi}, Smoker: {u.smoker}, "
+        f"Children: {u.children}, Activity days/week: {u.weekly_activity_days}, "
+        f"Alcohol units/week: {u.alcohol_units_week}, Conditions: {', '.join(u.conditions) if u.conditions else 'none'}, "
+        f"Region: {u.region}, Group policy option: {u.has_group_option}, "
+        f"Prefers higher deductible: {u.prefers_higher_deductible}"
+    )
+
+def generate_ai_insight(u: UserProfile, active_recos: List[Recommendation], config: AppConfig) -> str:
+    if not config.OPENAI_API_KEY:
+        return "Brak OPENAI_API_KEY w .env."
+
+    reco_titles = [r.title for r in active_recos] or ["No active recommendations"]
+    prompt = (
+        "You are a health-insurance assistant. "
+        "Provide a concise recommendation in Polish with 3 bullet points: "
+        "(1) main risk factors, (2) practical next steps for 30 days, "
+        "(3) what can lower insurance premium the most. "
+        "Keep response under 120 words and avoid medical diagnosis.\n\n"
+        f"User profile: {_build_profile_summary(u)}\n"
+        f"Current app recommendations: {', '.join(reco_titles)}"
+    )
+
+    try:
+        client = OpenAI(api_key=config.OPENAI_API_KEY)
+        response = client.responses.create(
+            model=config.OPENAI_MODEL,
+            input=prompt,
+            temperature=0.4,
+            max_output_tokens=220,
+        )
+        return (response.output_text or "Nie udało się wygenerować porady AI.").strip()
+    except Exception as exc:
+        return f"Błąd OpenAI: {exc}"
 
 class RecommendationEngine:
     def __init__(self, config: AppConfig):
@@ -224,6 +273,15 @@ def ui_recommendations(state: AppState):
                     st.success(f"{msg}")
                 else:
                     st.info("This simulation shows no savings for your current profile.")
+
+    st.divider()
+    st.markdown("### AI Insight (OpenAI)")
+    if st.button("Generate AI insight", key="btn_ai_insight"):
+        with st.spinner("Generating AI insight..."):
+            st.session_state.ai_insight = generate_ai_insight(state.profile, active_recos, state.config)
+
+    if st.session_state.get("ai_insight"):
+        st.info(st.session_state.ai_insight)
 
 def ui_savings_chart(state: AppState):
     if not st.session_state.get('simulations'):
