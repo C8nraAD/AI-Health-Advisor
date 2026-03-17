@@ -1,0 +1,15 @@
+.git
+.gitignore
+.vscode
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.env.local
+.DS_Store
+.pytest_cache
+README.md
+cv.json

@@ -3,5 +3,5 @@ pandas
 numpy
 plotly
 pycaret[full]
-boto3
+azure-storage-blob
 python-dotenv

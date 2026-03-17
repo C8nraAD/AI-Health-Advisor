@@ -1,10 +1,10 @@
 import os
-import boto3
 from dataclasses import dataclass, replace
 from typing import List, Any, Callable, Optional
 import pandas as pd
 import streamlit as st
 import plotly.express as px
+from azure.storage.blob import BlobServiceClient
 from pycaret.regression import load_model, predict_model
 from dotenv import load_dotenv
 
@@ -13,20 +13,11 @@ load_dotenv()
 @dataclass(frozen=True)
 class AppConfig:
     PAGE_TITLE: str = "AI Insurance Premium Advisor"
-    USD_TO_PLN_RATE: float = 4.0
-    MONTHS_IN_YEAR: int = 12
-    TARGET_BMI: float = 24.9
-    MARKET_ADJUSTMENT_FACTOR: float = 0.2
-    GROUP_POLICY_DISCOUNT: float = 0.85 
-    ALCOHOL_UNITS_THRESHOLD: int = 7
-    ACTIVITY_DAYS_THRESHOLD: int = 3
-    
-    AWS_ACCESS_KEY_ID: str = os.getenv("AWS_ACCESS_KEY_ID", "").strip()
-    AWS_SECRET_ACCESS_KEY: str = os.getenv("AWS_SECRET_ACCESS_KEY", "").strip()
-    AWS_ENDPOINT_URL_S3: str = os.getenv("AWS_ENDPOINT_URL_S3", "").strip()
-    DO_SPACE_NAME: str = os.getenv("DO_SPACE_NAME", "insurance").strip()
-    MODEL_S3_KEY: str = os.getenv("MODEL_S3_KEY", "fin.pkl").strip()
-    LOCAL_MODEL_NAME: str = "downloaded_model" 
+
+    AZURE_STORAGE_CONNECTION_STRING: str = os.getenv("AZURE_STORAGE_CONNECTION_STRING", "").strip()
+    AZURE_STORAGE_CONTAINER_NAME: str = os.getenv("AZURE_STORAGE_CONTAINER_NAME", "").strip()
+    AZURE_MODEL_BLOB_NAME: str = os.getenv("AZURE_MODEL_BLOB_NAME", "fin.pkl").strip()
+    MODEL_NAME = os.getenv("MODEL_NAME", "insurance.pkl")
 
 @dataclass(frozen=True)
 class UserProfile:
@@ -67,13 +58,18 @@ def load_pipeline(_config: AppConfig) -> Any:
     
     try:
         if not os.path.exists(local_file_path):
-            s3 = boto3.client(
-                "s3",
-                endpoint_url=_config.AWS_ENDPOINT_URL_S3,
-                aws_access_key_id=_config.AWS_ACCESS_KEY_ID,
-                aws_secret_access_key=_config.AWS_SECRET_ACCESS_KEY
+            if not _config.AZURE_STORAGE_CONNECTION_STRING:
+                raise RuntimeError("Missing AZURE_STORAGE_CONNECTION_STRING in environment.")
+            if not _config.AZURE_STORAGE_CONTAINER_NAME:
+                raise RuntimeError("Missing AZURE_STORAGE_CONTAINER_NAME in environment.")
+
+            blob_service = BlobServiceClient.from_connection_string(_config.AZURE_STORAGE_CONNECTION_STRING)
+            blob_client = blob_service.get_blob_client(
+                container=_config.AZURE_STORAGE_CONTAINER_NAME,
+                blob=_config.AZURE_MODEL_BLOB_NAME,
             )
-            s3.download_file(_config.DO_SPACE_NAME, _config.MODEL_S3_KEY, local_file_path)
+            with open(local_file_path, "wb") as model_file:
+                model_file.write(blob_client.download_blob().readall())
             
         return load_model(_config.LOCAL_MODEL_NAME, verbose=False)
         
